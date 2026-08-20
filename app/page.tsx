@@ -2,8 +2,8 @@
 
 import dynamic from 'next/dynamic';
 
-const DashboardClient = dynamic(() => import('./dashboard-client'), { ssr: false });
+const AuthGate = dynamic(() => import('./auth-gate'), { ssr: false });
 
 export default function Home() {
-  return <DashboardClient />;
+  return <AuthGate />;
 }
