@@ -63,6 +63,21 @@ create table public.giveaways (
   created_at timestamptz not null default now()
 );
 
+create index organizations_owner_id_idx on public.organizations(owner_id);
+create index break_nights_organization_id_idx on public.break_nights(organization_id);
+create index breaks_break_night_id_idx on public.breaks(break_night_id);
+create index spots_break_id_idx on public.spots(break_id);
+create index randomizations_break_id_idx on public.randomizations(break_id);
+create index giveaways_break_night_id_idx on public.giveaways(break_night_id);
+create index giveaways_break_id_idx on public.giveaways(break_id);
+
+grant select, insert, update, delete on public.organizations to authenticated;
+grant select, insert, update, delete on public.break_nights to authenticated;
+grant select, insert, update, delete on public.breaks to authenticated;
+grant select, insert, update, delete on public.spots to authenticated;
+grant select, insert, update, delete on public.randomizations to authenticated;
+grant select, insert, update, delete on public.giveaways to authenticated;
+
 alter table public.organizations enable row level security;
 alter table public.break_nights enable row level security;
 alter table public.breaks enable row level security;
@@ -71,24 +86,81 @@ alter table public.randomizations enable row level security;
 alter table public.giveaways enable row level security;
 
 create policy "owners manage organizations" on public.organizations
-for all using (owner_id = auth.uid()) with check (owner_id = auth.uid());
+for all to authenticated
+using ((select auth.uid()) = owner_id)
+with check ((select auth.uid()) = owner_id);
 
 create policy "owners manage break nights" on public.break_nights
-for all using (exists (select 1 from public.organizations o where o.id = organization_id and o.owner_id = auth.uid()))
-with check (exists (select 1 from public.organizations o where o.id = organization_id and o.owner_id = auth.uid()));
+for all to authenticated
+using (exists (
+  select 1 from public.organizations o
+  where o.id = organization_id and o.owner_id = (select auth.uid())
+))
+with check (exists (
+  select 1 from public.organizations o
+  where o.id = organization_id and o.owner_id = (select auth.uid())
+));
 
 create policy "owners manage breaks" on public.breaks
-for all using (exists (select 1 from public.break_nights n join public.organizations o on o.id = n.organization_id where n.id = break_night_id and o.owner_id = auth.uid()))
-with check (exists (select 1 from public.break_nights n join public.organizations o on o.id = n.organization_id where n.id = break_night_id and o.owner_id = auth.uid()));
+for all to authenticated
+using (exists (
+  select 1
+  from public.break_nights n
+  join public.organizations o on o.id = n.organization_id
+  where n.id = break_night_id and o.owner_id = (select auth.uid())
+))
+with check (exists (
+  select 1
+  from public.break_nights n
+  join public.organizations o on o.id = n.organization_id
+  where n.id = break_night_id and o.owner_id = (select auth.uid())
+));
 
 create policy "owners manage spots" on public.spots
-for all using (exists (select 1 from public.breaks b join public.break_nights n on n.id = b.break_night_id join public.organizations o on o.id = n.organization_id where b.id = break_id and o.owner_id = auth.uid()))
-with check (exists (select 1 from public.breaks b join public.break_nights n on n.id = b.break_night_id join public.organizations o on o.id = n.organization_id where b.id = break_id and o.owner_id = auth.uid()));
+for all to authenticated
+using (exists (
+  select 1
+  from public.breaks b
+  join public.break_nights n on n.id = b.break_night_id
+  join public.organizations o on o.id = n.organization_id
+  where b.id = break_id and o.owner_id = (select auth.uid())
+))
+with check (exists (
+  select 1
+  from public.breaks b
+  join public.break_nights n on n.id = b.break_night_id
+  join public.organizations o on o.id = n.organization_id
+  where b.id = break_id and o.owner_id = (select auth.uid())
+));
 
 create policy "owners manage randomizations" on public.randomizations
-for all using (exists (select 1 from public.breaks b join public.break_nights n on n.id = b.break_night_id join public.organizations o on o.id = n.organization_id where b.id = break_id and o.owner_id = auth.uid()))
-with check (exists (select 1 from public.breaks b join public.break_nights n on n.id = b.break_night_id join public.organizations o on o.id = n.organization_id where b.id = break_id and o.owner_id = auth.uid()));
+for all to authenticated
+using (exists (
+  select 1
+  from public.breaks b
+  join public.break_nights n on n.id = b.break_night_id
+  join public.organizations o on o.id = n.organization_id
+  where b.id = break_id and o.owner_id = (select auth.uid())
+))
+with check (exists (
+  select 1
+  from public.breaks b
+  join public.break_nights n on n.id = b.break_night_id
+  join public.organizations o on o.id = n.organization_id
+  where b.id = break_id and o.owner_id = (select auth.uid())
+));
 
 create policy "owners manage giveaways" on public.giveaways
-for all using (exists (select 1 from public.break_nights n join public.organizations o on o.id = n.organization_id where n.id = break_night_id and o.owner_id = auth.uid()))
-with check (exists (select 1 from public.break_nights n join public.organizations o on o.id = n.organization_id where n.id = break_night_id and o.owner_id = auth.uid()));
+for all to authenticated
+using (exists (
+  select 1
+  from public.break_nights n
+  join public.organizations o on o.id = n.organization_id
+  where n.id = break_night_id and o.owner_id = (select auth.uid())
+))
+with check (exists (
+  select 1
+  from public.break_nights n
+  join public.organizations o on o.id = n.organization_id
+  where n.id = break_night_id and o.owner_id = (select auth.uid())
+));
