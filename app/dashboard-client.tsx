@@ -6,13 +6,20 @@ import { createClient } from '@/lib/supabase/client';
 
 type Organization = { id: string; name: string; slug: string };
 type BreakNight = { id: string; name: string; status: 'draft' | 'live' | 'completed'; scheduled_for: string | null };
-type Break = { id: string; sequence_number: number; title: string; format: string; total_spots: number; price_per_spot: number; currency: string; status: string };
-type Spot = { id: string; spot_number: number; buyer_name: string | null; payment_status: 'unpaid' | 'paid' | 'partial' | 'comped'; amount_paid: number; assignment: string | null };
+type BreakStatus = 'draft' | 'open' | 'full' | 'randomized' | 'completed';
+type Break = { id: string; sequence_number: number; title: string; format: string; total_spots: number; price_per_spot: number; currency: string; status: BreakStatus };
+type PaymentStatus = 'unpaid' | 'paid' | 'partial' | 'comped';
+type Spot = { id: string; spot_number: number; buyer_name: string | null; payment_status: PaymentStatus; amount_paid: number; assignment: string | null };
+type SpotFilter = 'all' | 'open' | 'unpaid' | 'paid';
 
 const supabase = createClient();
 
 function slugify(value: string) {
   return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'breaker';
+}
+
+function formatLabel(format: string) {
+  return format.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 export default function DashboardClient() {
@@ -27,10 +34,13 @@ export default function DashboardClient() {
   const [spots, setSpots] = useState<Spot[]>([]);
   const [nightName, setNightName] = useState('Friday Night Breaks');
   const [breakTitle, setBreakTitle] = useState('');
+  const [breakFormat, setBreakFormat] = useState('random_teams');
   const [spotCount, setSpotCount] = useState(30);
   const [spotPrice, setSpotPrice] = useState(45);
   const [buyerName, setBuyerName] = useState('');
   const [buyerSpot, setBuyerSpot] = useState(1);
+  const [spotFilter, setSpotFilter] = useState<SpotFilter>('all');
+  const [spotView, setSpotView] = useState<'table' | 'grid'>('table');
 
   const activeBreak = useMemo(() => breaks.find((item) => item.id === activeBreakId) ?? null, [breaks, activeBreakId]);
 
@@ -155,7 +165,7 @@ export default function DashboardClient() {
     const sequence = breaks.length ? Math.max(...breaks.map((item) => item.sequence_number)) + 1 : 1;
     const { data: newBreak, error } = await supabase
       .from('breaks')
-      .insert({ break_night_id: night.id, sequence_number: sequence, title: breakTitle.trim(), total_spots: spotCount, price_per_spot: spotPrice, status: 'open' })
+      .insert({ break_night_id: night.id, sequence_number: sequence, title: breakTitle.trim(), format: breakFormat, total_spots: spotCount, price_per_spot: spotPrice, status: 'open' })
       .select('id,sequence_number,title,format,total_spots,price_per_spot,currency,status')
       .single();
     if (error) return setMessage(error.message);
@@ -164,8 +174,7 @@ export default function DashboardClient() {
     const { error: spotsError } = await supabase.from('spots').insert(rows);
     if (spotsError) return setMessage(spotsError.message);
 
-    const next = [...breaks, newBreak as Break];
-    setBreaks(next);
+    setBreaks((current) => [...current, newBreak as Break]);
     setActiveBreakId(newBreak.id);
     setBreakTitle('');
     setMessage(`Break #${sequence} created with ${spotCount} spots.`);
@@ -179,20 +188,52 @@ export default function DashboardClient() {
     if (error) return setMessage(error.message);
     setSpots((current) => current.map((spot) => spot.id === target.id ? { ...spot, buyer_name: buyerName.trim() } : spot));
     setBuyerName('');
-    setMessage(`Assigned spot ${buyerSpot}.`);
+    setBuyerSpot(nextOpenSpot(target.spot_number));
+    setMessage(`Assigned ${target.spot_number} to buyer.`);
   }
 
-  async function togglePaid(spot: Spot) {
-    const paid = spot.payment_status !== 'paid';
-    const nextStatus = paid ? 'paid' : 'unpaid';
-    const amount = paid ? Number(activeBreak?.price_per_spot ?? 0) : 0;
-    const { error } = await supabase.from('spots').update({ payment_status: nextStatus, amount_paid: amount }).eq('id', spot.id);
+  function nextOpenSpot(after = 0) {
+    return spots.find((spot) => spot.spot_number > after && !spot.buyer_name)?.spot_number
+      ?? spots.find((spot) => !spot.buyer_name)?.spot_number
+      ?? 1;
+  }
+
+  async function clearBuyer(spot: Spot) {
+    const { error } = await supabase.from('spots').update({ buyer_name: null, payment_status: 'unpaid', amount_paid: 0, assignment: null }).eq('id', spot.id);
     if (error) return setMessage(error.message);
-    setSpots((current) => current.map((item) => item.id === spot.id ? { ...item, payment_status: nextStatus, amount_paid: amount } : item));
+    setSpots((current) => current.map((item) => item.id === spot.id ? { ...item, buyer_name: null, payment_status: 'unpaid', amount_paid: 0, assignment: null } : item));
   }
 
-  const paidRevenue = spots.reduce((sum, spot) => sum + Number(spot.amount_paid || 0), 0);
+  async function updatePayment(spot: Spot, paymentStatus: PaymentStatus) {
+    const price = Number(activeBreak?.price_per_spot ?? 0);
+    const amount = paymentStatus === 'paid' ? price : paymentStatus === 'comped' ? 0 : Number(spot.amount_paid || 0);
+    const { error } = await supabase.from('spots').update({ payment_status: paymentStatus, amount_paid: amount }).eq('id', spot.id);
+    if (error) return setMessage(error.message);
+    setSpots((current) => current.map((item) => item.id === spot.id ? { ...item, payment_status: paymentStatus, amount_paid: amount } : item));
+  }
+
+  async function updateBreakStatus(status: BreakStatus) {
+    if (!activeBreak) return;
+    const { error } = await supabase.from('breaks').update({ status }).eq('id', activeBreak.id);
+    if (error) return setMessage(error.message);
+    setBreaks((current) => current.map((item) => item.id === activeBreak.id ? { ...item, status } : item));
+    setMessage(`Break #${activeBreak.sequence_number} marked ${status}.`);
+  }
+
   const soldSpots = spots.filter((spot) => Boolean(spot.buyer_name)).length;
+  const openSpots = spots.length - soldSpots;
+  const paidCount = spots.filter((spot) => spot.payment_status === 'paid' || spot.payment_status === 'comped').length;
+  const unpaidCount = spots.filter((spot) => spot.buyer_name && spot.payment_status === 'unpaid').length;
+  const paidRevenue = spots.reduce((sum, spot) => sum + Number(spot.amount_paid || 0), 0);
+  const expectedRevenue = activeBreak ? soldSpots * Number(activeBreak.price_per_spot) : 0;
+  const outstanding = Math.max(0, expectedRevenue - paidRevenue);
+
+  const filteredSpots = useMemo(() => spots.filter((spot) => {
+    if (spotFilter === 'open') return !spot.buyer_name;
+    if (spotFilter === 'unpaid') return Boolean(spot.buyer_name) && spot.payment_status === 'unpaid';
+    if (spotFilter === 'paid') return Boolean(spot.buyer_name) && (spot.payment_status === 'paid' || spot.payment_status === 'comped');
+    return true;
+  }), [spots, spotFilter]);
 
   if (loading) return <main className="shell"><p className="muted">Loading dashboard…</p></main>;
 
@@ -200,9 +241,10 @@ export default function DashboardClient() {
     return (
       <main className="authShell">
         <section className="authCard">
+          <div className="brandMark">BD</div>
           <p className="eyebrow">Breaker Dashboard</p>
-          <h1>Run your break night from one place.</h1>
-          <p className="muted">Sign in with a magic link. Your breaks, buyers, and payment status are saved securely to your account.</p>
+          <h1>Your live break command center.</h1>
+          <p className="muted">Manage spots, buyers, payments, randoms and giveaways without juggling spreadsheets during a stream.</p>
           <form className="formStack" onSubmit={signIn}>
             <label>Email<input type="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="breaker@example.com" /></label>
             <button className="primary" type="submit">Send magic link</button>
@@ -214,90 +256,182 @@ export default function DashboardClient() {
   }
 
   return (
-    <main className="shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">{organization?.name ?? 'Breaker Dashboard'}</p>
-          <h1>{night?.name ?? 'Create your first break night'}</h1>
-          <p className="muted">Signed in as {session.user.email}</p>
-        </div>
-        <button className="secondary" onClick={() => supabase.auth.signOut()}>Sign out</button>
-      </header>
+    <main className="appShell">
+      <aside className="sideNav">
+        <div className="brandMark small">BD</div>
+        <nav aria-label="Workspace navigation">
+          <button className="navItem active">Breaks</button>
+          <button className="navItem" disabled>Randoms</button>
+          <button className="navItem" disabled>Giveaways</button>
+          <button className="navItem" disabled>History</button>
+        </nav>
+        <button className="navItem signOut" onClick={() => supabase.auth.signOut()}>Sign out</button>
+      </aside>
 
-      {!night ? (
-        <section className="panel compactPanel">
-          <h2>Start a break night</h2>
-          <form className="inlineForm" onSubmit={createNight}>
-            <label>Night name<input value={nightName} onChange={(event) => setNightName(event.target.value)} /></label>
-            <button className="primary" type="submit">Create break night</button>
-          </form>
-        </section>
-      ) : (
-        <>
-          <section className="metrics">
-            <article><span>Breaks tonight</span><strong>{breaks.length}</strong></article>
-            <article><span>Current break spots</span><strong>{soldSpots} / {activeBreak?.total_spots ?? 0}</strong></article>
-            <article><span>Current break paid</span><strong>€{paidRevenue.toFixed(2)}</strong></article>
-          </section>
+      <div className="mainPane">
+        <header className="appHeader">
+          <div>
+            <p className="eyebrow">{organization?.name ?? 'Breaker Dashboard'}</p>
+            <h1>{night?.name ?? 'Create your first break night'}</h1>
+            <p className="muted">Live workspace · {session.user.email}</p>
+          </div>
+          {night ? <span className={`nightPill ${night.status}`}>{night.status}</span> : null}
+        </header>
 
-          <section className="panel">
-            <div className="sectionTitle"><div><p className="eyebrow">Break night</p><h2>{night.name}</h2></div><span>{night.status}</span></div>
-            <form className="createBreakForm" onSubmit={createBreak}>
-              <label>Set / product<input required value={breakTitle} onChange={(event) => setBreakTitle(event.target.value)} placeholder="2026 Topps Chrome Baseball" /></label>
-              <label>Spots<input type="number" min="1" max="500" value={spotCount} onChange={(event) => setSpotCount(Number(event.target.value))} /></label>
-              <label>Price / spot<input type="number" min="0" step="0.01" value={spotPrice} onChange={(event) => setSpotPrice(Number(event.target.value))} /></label>
-              <button className="primary" type="submit">+ Add break</button>
+        {!night ? (
+          <section className="panel emptyState">
+            <p className="eyebrow">First setup</p>
+            <h2>Start a break night</h2>
+            <p className="muted">A break night groups all breaks, buyers, randomizations and giveaways from one stream.</p>
+            <form className="inlineForm" onSubmit={createNight}>
+              <label>Night name<input value={nightName} onChange={(event) => setNightName(event.target.value)} /></label>
+              <button className="primary" type="submit">Create break night</button>
             </form>
           </section>
-
-          <section className="panel">
-            <div className="sectionTitle"><h2>Breaks</h2><span>{breaks.length ? 'Select a break to manage it' : 'No breaks yet'}</span></div>
-            <div className="breakList">
-              {breaks.map((item) => (
-                <button className={`breakRow ${item.id === activeBreakId ? 'active' : ''}`} key={item.id} onClick={() => setActiveBreakId(item.id)}>
-                  <span><b>#{item.sequence_number}</b><em>{item.title}</em></span>
-                  <span className="right"><b>{item.total_spots} spots</b><em>€{Number(item.price_per_spot).toFixed(2)} / spot</em></span>
-                </button>
-              ))}
-            </div>
-          </section>
-
-          {activeBreak ? (
-            <section className="workspace">
-              <article className="panel">
-                <p className="eyebrow">Break #{activeBreak.sequence_number}</p>
-                <h2>{activeBreak.title}</h2>
-                <p className="muted">{activeBreak.total_spots} spots · €{Number(activeBreak.price_per_spot).toFixed(2)}/spot</p>
-
-                <form className="assignForm" onSubmit={assignBuyer}>
-                  <label>Buyer<input value={buyerName} onChange={(event) => setBuyerName(event.target.value)} placeholder="CardKing22" /></label>
-                  <label>Spot<input type="number" min="1" max={activeBreak.total_spots} value={buyerSpot} onChange={(event) => setBuyerSpot(Number(event.target.value))} /></label>
-                  <button className="secondary" type="submit">Assign buyer</button>
-                </form>
-
-                <div className="table">
-                  <div className="tr head"><span>Spot</span><span>Buyer</span><span>Payment</span><span>Assignment</span></div>
-                  {spots.map((spot) => (
-                    <div className="tr" key={spot.id}>
-                      <span>{String(spot.spot_number).padStart(2, '0')}</span>
-                      <span>{spot.buyer_name ?? <em className="muted">Open</em>}</span>
-                      <span><button className={`statusButton ${spot.payment_status === 'paid' ? 'paid' : 'unpaid'}`} disabled={!spot.buyer_name} onClick={() => togglePaid(spot)}>{spot.payment_status === 'paid' ? 'Paid' : 'Unpaid'}</button></span>
-                      <span>{spot.assignment ?? '—'}</span>
-                    </div>
-                  ))}
-                </div>
-              </article>
-
-              <aside className="stack">
-                <article className="panel action"><p className="eyebrow">Next milestone</p><h3>Randomizer</h3><p className="muted">The buyer and payment data is now real. Randomization and immutable verification records are the next feature.</p></article>
-                <article className="panel action"><p className="eyebrow">Saved automatically</p><h3>Database-backed</h3><p className="muted">Refresh the page and your break night, breaks, buyers, and payment status remain stored in Supabase.</p></article>
-              </aside>
+        ) : (
+          <>
+            <section className="metrics metricsFour">
+              <article><span>Breaks tonight</span><strong>{breaks.length}</strong><small>in this stream</small></article>
+              <article><span>Spots sold</span><strong>{soldSpots}<i>/{activeBreak?.total_spots ?? 0}</i></strong><small>{openSpots} open</small></article>
+              <article><span>Payments</span><strong>{paidCount}<i> paid</i></strong><small>{unpaidCount} unpaid</small></article>
+              <article><span>Collected</span><strong>€{paidRevenue.toFixed(2)}</strong><small>€{outstanding.toFixed(2)} outstanding</small></article>
             </section>
-          ) : null}
-        </>
-      )}
 
-      {message ? <div className="toast" role="status">{message}</div> : null}
+            <section className="panel createPanel">
+              <div className="sectionTitle">
+                <div><p className="eyebrow">Tonight's queue</p><h2>Add a break</h2></div>
+                <span>{breaks.length} configured</span>
+              </div>
+              <form className="createBreakForm" onSubmit={createBreak}>
+                <label>Set / product<input required value={breakTitle} onChange={(event) => setBreakTitle(event.target.value)} placeholder="2026 Topps Chrome Baseball" /></label>
+                <label>Format
+                  <select value={breakFormat} onChange={(event) => setBreakFormat(event.target.value)}>
+                    <option value="random_teams">Random Teams</option>
+                    <option value="pick_your_team">Pick Your Team</option>
+                    <option value="random_divisions">Random Divisions</option>
+                    <option value="random_spots">Random Spots</option>
+                  </select>
+                </label>
+                <label>Spots<input type="number" min="1" max="500" value={spotCount} onChange={(event) => setSpotCount(Number(event.target.value))} /></label>
+                <label>Price<input type="number" min="0" step="0.01" value={spotPrice} onChange={(event) => setSpotPrice(Number(event.target.value))} /></label>
+                <button className="primary" type="submit">+ Add</button>
+              </form>
+            </section>
+
+            <section className="queueLayout">
+              <aside className="panel breakQueue">
+                <div className="sectionTitle"><h2>Break queue</h2><span>{breaks.length}</span></div>
+                <div className="breakList">
+                  {breaks.length ? breaks.map((item) => (
+                    <button className={`breakRow ${item.id === activeBreakId ? 'active' : ''}`} key={item.id} onClick={() => setActiveBreakId(item.id)}>
+                      <span className="breakNumber">#{item.sequence_number}</span>
+                      <span className="breakInfo"><b>{item.title}</b><em>{formatLabel(item.format)} · €{Number(item.price_per_spot).toFixed(2)}</em></span>
+                      <span className={`statusDot ${item.status}`} title={item.status} />
+                    </button>
+                  )) : <p className="muted emptyCopy">Add tonight's first break above.</p>}
+                </div>
+              </aside>
+
+              {activeBreak ? (
+                <section className="breakWorkspace">
+                  <article className="panel breakHero">
+                    <div>
+                      <div className="heroMeta"><span>Break #{activeBreak.sequence_number}</span><span>{formatLabel(activeBreak.format)}</span></div>
+                      <h2>{activeBreak.title}</h2>
+                      <p className="muted">{soldSpots}/{activeBreak.total_spots} spots sold · €{Number(activeBreak.price_per_spot).toFixed(2)} per spot</p>
+                    </div>
+                    <div className="heroActions">
+                      <select aria-label="Break status" value={activeBreak.status} onChange={(event) => updateBreakStatus(event.target.value as BreakStatus)}>
+                        <option value="open">Open</option>
+                        <option value="full">Full</option>
+                        <option value="randomized">Randomized</option>
+                        <option value="completed">Completed</option>
+                      </select>
+                      <span className={`statusBadge ${activeBreak.status}`}>{activeBreak.status}</span>
+                    </div>
+                  </article>
+
+                  <article className="panel spotPanel">
+                    <div className="spotToolbar">
+                      <form className="assignForm" onSubmit={assignBuyer}>
+                        <label>Buyer<input value={buyerName} onChange={(event) => setBuyerName(event.target.value)} placeholder="CardKing22" /></label>
+                        <label>Spot<input type="number" min="1" max={activeBreak.total_spots} value={buyerSpot} onChange={(event) => setBuyerSpot(Number(event.target.value))} /></label>
+                        <button className="primary" type="submit">Assign</button>
+                      </form>
+                      <div className="viewControls" aria-label="Spot view controls">
+                        <button className={spotView === 'table' ? 'active' : ''} onClick={() => setSpotView('table')}>List</button>
+                        <button className={spotView === 'grid' ? 'active' : ''} onClick={() => setSpotView('grid')}>Grid</button>
+                      </div>
+                    </div>
+
+                    <div className="filterBar">
+                      {(['all','open','unpaid','paid'] as SpotFilter[]).map((filter) => (
+                        <button key={filter} className={spotFilter === filter ? 'active' : ''} onClick={() => setSpotFilter(filter)}>
+                          {filter === 'all' ? `All ${spots.length}` : filter === 'open' ? `Open ${openSpots}` : filter === 'unpaid' ? `Unpaid ${unpaidCount}` : `Paid ${paidCount}`}
+                        </button>
+                      ))}
+                    </div>
+
+                    {spotView === 'table' ? (
+                      <div className="table">
+                        <div className="tr head"><span>Spot</span><span>Buyer</span><span>Payment</span><span>Assignment</span><span /></div>
+                        {filteredSpots.map((spot) => (
+                          <div className="tr" key={spot.id}>
+                            <strong>{String(spot.spot_number).padStart(2, '0')}</strong>
+                            <span>{spot.buyer_name ?? <em className="muted">Open</em>}</span>
+                            <span>
+                              <select className={`paymentSelect ${spot.payment_status}`} disabled={!spot.buyer_name} value={spot.payment_status} onChange={(event) => updatePayment(spot, event.target.value as PaymentStatus)}>
+                                <option value="unpaid">Unpaid</option>
+                                <option value="paid">Paid</option>
+                                <option value="partial">Partial</option>
+                                <option value="comped">Comped</option>
+                              </select>
+                            </span>
+                            <span>{spot.assignment ?? '—'}</span>
+                            <span>{spot.buyer_name ? <button className="iconButton" title="Clear buyer" onClick={() => clearBuyer(spot)}>×</button> : null}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="spotGrid">
+                        {filteredSpots.map((spot) => (
+                          <button key={spot.id} className={`spotTile ${spot.buyer_name ? spot.payment_status : 'open'}`} onClick={() => setBuyerSpot(spot.spot_number)}>
+                            <strong>{String(spot.spot_number).padStart(2, '0')}</strong>
+                            <span>{spot.buyer_name ?? 'Open'}</span>
+                            <em>{spot.buyer_name ? spot.payment_status : 'available'}</em>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </article>
+
+                  <section className="toolCards">
+                    <article className="toolCard featured">
+                      <div><span className="toolIcon">R</span><div><p className="eyebrow">Randomizer</p><h3>Random teams</h3></div></div>
+                      <p>Use the paid spot list, lock the inputs, then save a verification record.</p>
+                      <button className="primary" disabled>Run randomizer · next</button>
+                    </article>
+                    <article className="toolCard">
+                      <div><span className="toolIcon">G</span><div><p className="eyebrow">Giveaway</p><h3>Pick a winner</h3></div></div>
+                      <p>Choose eligibility from paid buyers, all buyers, or a custom list.</p>
+                      <button className="secondary" disabled>Run giveaway · next</button>
+                    </article>
+                    <article className="toolCard">
+                      <div><span className="toolIcon">O</span><div><p className="eyebrow">OBS</p><h3>Live overlay</h3></div></div>
+                      <p>Send spot counts, random results and winners to the stream.</p>
+                      <button className="secondary" disabled>Open overlay · later</button>
+                    </article>
+                  </section>
+                </section>
+              ) : (
+                <section className="panel emptyState"><h2>No active break</h2><p className="muted">Create a break to start managing spots.</p></section>
+              )}
+            </section>
+          </>
+        )}
+
+        {message ? <div className="toast" role="status" onClick={() => setMessage('')}>{message}</div> : null}
+      </div>
     </main>
   );
 }
