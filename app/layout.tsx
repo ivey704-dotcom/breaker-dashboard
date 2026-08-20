@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import "./feature-controls.css";
+import "./event-surfaces.css";
 
 export const metadata: Metadata = {
   title: "Breaker Dashboard",
